@@ -4,6 +4,35 @@
 
 ## 新增目标检测模型
 
+### 在 AutoDL 上直接启动训练
+
+运行 `python train.py`。入口按照给出的 RF-DETR 训练脚本参数配置，实际构建的是本项目 ResNeXt + FCOS UAV 检测模型；没有改用 `RFDETRSmall`。
+
+```python
+DATASET_DIR = "/root/autodl-tmp/HazyDet_RFDETR"
+OUTPUT_DIR = "/root/autodl-tmp/rf-detr-output/hazydet_small_test"
+```
+
+默认参数：`epochs=1`、`batch_size=2`、`grad_accum_steps=2`、`lr=1e-4`、`device="cuda"`、`num_workers=4`、`use_ema=True`、`checkpoint_interval=1`。使用 AdamW（weight_decay=1e-4），通常每 4 张图片更新一次参数；最后不足一个累积窗口也会正确更新。
+
+数据集按 [RF-DETR COCO 导出格式](https://rfdetr.roboflow.com/learn/train/) 读取：
+
+```text
+/root/autodl-tmp/HazyDet_RFDETR/
+├── train/
+│   ├── _annotations.coco.json
+│   └── 图片文件...
+└── valid/
+    ├── _annotations.coco.json
+    └── 图片文件...
+```
+
+`detection_dataset.py` 将 COCO 的 xywh 框转为 xyxy，按照训练标注中的 categories 自动确定类别数，将原始 ID 映射到从 0 开始的连续编号。验证集沿用同一映射，类别名称不一致时会报错。训练跳过 iscrowd 标注（当前 FCOS 不支持 crowd 忽略区训练），验证保留其忽略语义。图片转为 RGB 并归一到 [0,1]，其余缩放/标准化由模型完成。
+
+每轮在验证集输出整体及大、中、小目标指标。启用 EMA 时，指标来自 EMA 模型，CSV 中 `evaluated_weights=ema`；EMA 衰减系数为 0.999，每次优化器更新后更新。`last.pth` 和每轮的 `checkpoint_0001.pth` 包含原模型 `model`、EMA 权重 `ema`、优化器状态及类别映射。推理要复现 EMA 验证结果，应加载 checkpoint 的 `ema` 字段。
+
+默认没有预训练初始化，仍需自行提供兼容的 `backbone_path` 才能加载骨干权重。输出目录若已有 `metrics.csv` 会报错以保留旧实验；需要新实验时修改 `OUTPUT_DIR`。首次运行前在服务器安装 CUDA 版 PyTorch 和匹配 torchvision，再安装 `requirements-detection.txt`。当前本地无法访问上述 AutoDL 路径，需在数据所在服务器执行。
+
 结构：`ResNeXt-101 → FPN（P2/P3/P4/P5）→ 上下文增强 → FCOS 分类、框回归、中心度预测`。
 
 - P2–P5 的步长为 4、8、16、32，保留高分辨率特征用于小目标检测。

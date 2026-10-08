@@ -4,6 +4,7 @@ import csv
 import io
 import math
 from contextlib import redirect_stdout
+from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -126,23 +127,67 @@ def evaluate_by_size(model, loader, num_classes, device='cpu'):
             model.score_thresh = old_threshold
 
 
-def train_one_epoch(model, loader, optimizer, device='cpu'):
+class ModelEMA:
+    """EMA weights updated after optimizer steps; copy integer buffers directly."""
+
+    def __init__(self, model, decay=0.999):
+        self.model = deepcopy(model).eval()
+        self.model.requires_grad_(False)
+        self.decay = decay
+        self.updates = 0
+
+    @torch.no_grad()
+    def update(self, model):
+        self.updates += 1
+        source_state = model.state_dict()
+        for name, value in self.model.state_dict().items():
+            source = source_state[name].detach()
+            if value.is_floating_point():
+                value.mul_(self.decay).add_(source, alpha=1 - self.decay)
+            else:
+                value.copy_(source)
+
+
+def train_one_epoch(model, loader, optimizer, device='cpu', grad_accum_steps=1,
+                    ema=None):
+    if grad_accum_steps < 1:
+        raise ValueError('grad_accum_steps must be positive')
     model.train()
     totals, num_images = {}, 0
-    for images, targets in loader:
+    window_images, window_batches = 0, 0
+    optimizer.zero_grad(set_to_none=True)
+
+    def step():
+        for group in optimizer.param_groups:
+            for parameter in group['params']:
+                if parameter.grad is not None:
+                    parameter.grad.div_(window_images)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if ema is not None:
+            ema.update(model)
+
+    for batch_index, (images, targets) in enumerate(loader, 1):
         images = [image.to(device) for image in images]
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v
                     for k, v in target.items()} for target in targets]
-        optimizer.zero_grad(set_to_none=True)
         losses = model(images, targets)
         total = sum(losses.values())
         if not torch.isfinite(total):
             raise FloatingPointError('Non-finite training loss')
-        total.backward()
-        optimizer.step()
+        (total * len(images)).backward()
+        window_images += len(images)
+        window_batches += 1
+        if window_batches == grad_accum_steps:
+            step()
+            window_images, window_batches = 0, 0
         for key, value in dict(losses, total=total).items():
             totals[key] = totals.get(key, 0.0) + value.detach().item() * len(images)
         num_images += len(images)
+        if batch_index % 20 == 0:
+            print(f'  batch={batch_index} loss={totals["total"] / num_images:.4f}', flush=True)
+    if window_batches:
+        step()
     if not num_images:
         raise ValueError('Training loader is empty')
     return {key: value / num_images for key, value in totals.items()}
@@ -164,7 +209,8 @@ def format_epoch(epoch, losses, metrics):
 
 
 def fit(model, train_loader, val_loader, optimizer, num_classes, epochs,
-        device='cpu', output_dir='runs/train', start_epoch=1):
+        device='cpu', output_dir='runs/train', start_epoch=1, grad_accum_steps=1,
+        use_ema=False, checkpoint_interval=1, metadata=None):
     """Train then validate every epoch; save metrics.csv and last.pth.
 
     Move the model to device BEFORE creating the optimizer. Loaders must be
@@ -176,23 +222,37 @@ def fit(model, train_loader, val_loader, optimizer, num_classes, epochs,
         raise ValueError('epochs and start_epoch must be positive')
     if num_classes < 1:
         raise ValueError('num_classes must be positive')
+    if grad_accum_steps < 1 or checkpoint_interval < 1:
+        raise ValueError('grad_accum_steps and checkpoint_interval must be positive')
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     history = []
+    ema = ModelEMA(model) if use_ema else None
     with (output_dir / 'metrics.csv').open('x', newline='', encoding='utf-8') as stream:
         writer = None
         for epoch in range(start_epoch, start_epoch + epochs):
-            losses = train_one_epoch(model, train_loader, optimizer, device)
-            metrics = evaluate_by_size(model, val_loader, num_classes, device)
+            print(f'Epoch {epoch}: training...', flush=True)
+            losses = train_one_epoch(model, train_loader, optimizer, device,
+                                     grad_accum_steps, ema)
+            print(f'Epoch {epoch}: validating {"EMA" if ema else "model"}...', flush=True)
+            metrics = evaluate_by_size(ema.model if ema else model, val_loader, num_classes, device)
             print(format_epoch(epoch, losses, metrics), flush=True)
-            row = {'epoch': epoch, **{'loss_' + k: v for k, v in losses.items()}, **metrics}
+            row = {'epoch': epoch, 'evaluated_weights': 'ema' if ema else 'model',
+                   **{'loss_' + k: v for k, v in losses.items()}, **metrics}
             if writer is None:
                 writer = csv.DictWriter(stream, fieldnames=list(row))
                 writer.writeheader()
             writer.writerow(row)
             stream.flush()
-            torch.save({'epoch': epoch, 'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict(), 'metrics': metrics,
-                        'num_classes': num_classes}, output_dir / 'last.pth')
+            checkpoint = {'epoch': epoch, 'model': model.state_dict(),
+                          'optimizer': optimizer.state_dict(), 'metrics': metrics,
+                          'num_classes': num_classes, 'metadata': metadata,
+                          'evaluated_weights': 'ema' if ema else 'model'}
+            if ema:
+                checkpoint.update(ema=ema.model.state_dict(), ema_updates=ema.updates,
+                                  ema_decay=ema.decay)
+            torch.save(checkpoint, output_dir / 'last.pth')
+            if epoch % checkpoint_interval == 0:
+                torch.save(checkpoint, output_dir / f'checkpoint_{epoch:04d}.pth')
             history.append(row)
     return history
