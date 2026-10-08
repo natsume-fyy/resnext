@@ -1,0 +1,5 @@
+# Tested together on CPU; install the corresponding CUDA wheels for GPU use.
+torch==2.5.1
+torchvision==0.20.1
+numpy>=1.26,<3
+pycocotools==2.0.11

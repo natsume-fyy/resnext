@@ -3,8 +3,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from backbone.resnext.resnext101_regular import ResNeXt101
-
 
 class RefNet(nn.Module):
     def __init__(self,in_ch,inc_ch):
@@ -222,6 +220,8 @@ class DenseContrastModule(nn.Module):
 class GlassNet(nn.Module):
     def __init__(self, backbone_path=None):
         super(GlassNet, self).__init__()
+        from backbone.resnext.resnext101_regular import ResNeXt101
+
         resnext = ResNeXt101(backbone_path)
         self.layer0 = resnext.layer0
         self.layer1 = resnext.layer1

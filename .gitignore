@@ -12,3 +12,4 @@ venv/
 GSD/
 released_gsd_results/
 released_gsd_reflections/
+runs/
