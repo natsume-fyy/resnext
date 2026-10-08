@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+.env
+.env.*
+*.pth
+*.pt
+*.ckpt
+GSD/
+released_gsd_results/
+released_gsd_reflections/
